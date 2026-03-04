@@ -12,96 +12,30 @@ VLLM_REF="main"
 VLLM_REF_SET=false
 VLLM_PRS=""
 FULL_LOG=false
-BUILD_JOBS="16"
+BUILD_JOBS=$(( $(nproc) - 4 ))
 GPU_ARCH_LIST=""
-WHEELS_REPO="eugr/spark-vllm-docker"
-FLASHINFER_RELEASE_TAG="prebuilt-flashinfer-current"
-# Space-separated list of GPU architectures for which prebuilt wheels are available
-PREBUILT_WHEELS_SUPPORTED_ARCHS="12.1a"
 
-# try_download_wheels TAG PREFIX
-# Downloads wheels matching PREFIX*.whl from a GitHub release.
-# Skips files that are already present and up to date (by remote updated_at vs local mtime).
-# Returns 0 if all matching wheels are now available, 1 on any error.
-try_download_wheels() {
-    local TAG="$1"
-    local PREFIX="$2"
-    local WHEELS_DIR="./wheels"
+CHECK_ONLY=false
 
-    local arch
-    for arch in $PREBUILT_WHEELS_SUPPORTED_ARCHS; do
-        [ "$arch" = "$GPU_ARCH_LIST" ] && break
-        arch=""
-    done
-    if [ -z "$arch" ]; then
-        echo "GPU arch '$GPU_ARCH_LIST' not supported by prebuilt wheels (supported: $PREBUILT_WHEELS_SUPPORTED_ARCHS) — skipping download."
-        return 1
+FLASHINFER_REPO="https://github.com/flashinfer-ai/flashinfer.git"
+FLASHINFER_REF="main"
+VLLM_REPO="https://github.com/vllm-project/vllm.git"
+CUTLASS_REPO="https://github.com/NVIDIA/cutlass.git"
+CUTLASS_REF="v4.4.1"
+NGC_IMAGE="nvcr.io/nvidia/pytorch"
+NGC_TAG="26.02-py3"
+
+# Resolve the HEAD SHA for a remote git ref (branch or tag)
+# Returns empty string on failure (e.g. no network)
+resolve_remote_sha() {
+    local url="$1"
+    local ref="$2"
+    local sha
+    sha=$(git ls-remote "$url" "refs/heads/$ref" 2>/dev/null | head -1 | cut -f1)
+    if [ -z "$sha" ]; then
+        sha=$(git ls-remote "$url" "refs/tags/$ref" 2>/dev/null | head -1 | cut -f1)
     fi
-
-    local RELEASE_JSON
-    RELEASE_JSON=$(curl -sf --connect-timeout 10 \
-        "https://api.github.com/repos/$WHEELS_REPO/releases/tags/$TAG") || {
-        echo "Could not fetch release metadata for '$TAG' — skipping download."
-        return 1
-    }
-
-    local DOWNLOAD_LIST
-    DOWNLOAD_LIST=$(echo "$RELEASE_JSON" | python3 -c '
-import json, sys, os
-from datetime import datetime, timezone
-
-wheels_dir, prefix = sys.argv[1], sys.argv[2]
-data = json.load(sys.stdin)
-assets = [a for a in data.get("assets", [])
-          if a["name"].startswith(prefix) and a["name"].endswith(".whl")]
-
-if not assets:
-    print("No assets found matching prefix: " + prefix, file=sys.stderr)
-    sys.exit(1)
-
-for a in assets:
-    local_path = os.path.join(wheels_dir, a["name"])
-    remote_ts = datetime.strptime(a["updated_at"], "%Y-%m-%dT%H:%M:%SZ") \
-                    .replace(tzinfo=timezone.utc).timestamp()
-    if not os.path.exists(local_path) or remote_ts > os.path.getmtime(local_path):
-        print(a["browser_download_url"] + " " + a["name"])
-' "$WHEELS_DIR" "$PREFIX") || return 1
-
-    if [ -z "$DOWNLOAD_LIST" ]; then
-        echo "All $PREFIX wheels are up to date — skipping download."
-        return 0
-    fi
-
-    # Back up existing wheels so we never leave a mix of old and new on failure
-    local DL_BACKUP="$WHEELS_DIR/.backup-download-${PREFIX}"
-    rm -rf "$DL_BACKUP" && mkdir -p "$DL_BACKUP"
-    for f in "$WHEELS_DIR/${PREFIX}"*.whl; do
-        [ -f "$f" ] && mv "$f" "$DL_BACKUP/"
-    done
-
-    local URL NAME TMP_WHL
-    local DOWNLOADED=()
-    while IFS=' ' read -r URL NAME; do
-        echo "Downloading $NAME..."
-        TMP_WHL=$(mktemp "$WHEELS_DIR/${NAME}.XXXXXX")
-        if curl -L --progress-bar --connect-timeout 30 "$URL" -o "$TMP_WHL"; then
-            mv "$TMP_WHL" "$WHEELS_DIR/$NAME"
-            DOWNLOADED+=("$WHEELS_DIR/$NAME")
-        else
-            rm -f "$TMP_WHL"
-            echo "Failed to download $NAME — removing other downloaded files."
-            for f in "${DOWNLOADED[@]}"; do rm -f "$f"; done
-            if compgen -G "$DL_BACKUP/${PREFIX}*.whl" > /dev/null 2>&1; then
-                echo "Restoring previous $PREFIX wheels..."
-                mv "$DL_BACKUP/${PREFIX}"*.whl "$WHEELS_DIR/"
-            fi
-            rm -rf "$DL_BACKUP"
-            return 1
-        fi
-    done <<< "$DOWNLOAD_LIST"
-
-    rm -rf "$DL_BACKUP"
-    return 0
+    echo "$sha"
 }
 
 # Help function
@@ -114,6 +48,7 @@ usage() {
     echo "  --vllm-ref <ref>              : vLLM commit SHA, branch or tag (default: 'main')"
     echo "  -j, --build-jobs <jobs>       : Number of concurrent build jobs (default: ${BUILD_JOBS})"
     echo "  --apply-vllm-pr <pr-num>      : Apply a specific PR patch to vLLM source. Can be specified multiple times."
+    echo "  --check                       : Dry-run: report what's stale without building"
     echo "  --full-log                    : Enable full build logging (--progress=plain)"
     echo "  -h, --help                    : Show this help message"
     exit 1
@@ -141,6 +76,7 @@ while [[ "$#" -gt 0 ]]; do
                exit 1
             fi
             ;;
+        --check) CHECK_ONLY=true ;;
         --full-log) FULL_LOG=true ;;
         -h|--help) usage ;;
         *) echo "Unknown parameter passed: $1"; usage ;;
@@ -170,6 +106,92 @@ fi
 # Ensure wheels directory exists
 mkdir -p ./wheels
 
+# ----------------------------------------------------------
+# --check mode: report staleness and exit
+# ----------------------------------------------------------
+if [ "$CHECK_ONLY" = true ]; then
+    echo ""
+    echo "========================================="
+    echo "         STALENESS CHECK"
+    echo "========================================="
+    STALE=0
+
+    # FlashInfer
+    if compgen -G "./wheels/flashinfer*.whl" > /dev/null 2>&1; then
+        FI_REMOTE_SHA=$(resolve_remote_sha "$FLASHINFER_REPO" "$FLASHINFER_REF")
+        FI_LOCAL_SHA=""
+        [ -f "./wheels/.flashinfer-sha" ] && FI_LOCAL_SHA=$(cat "./wheels/.flashinfer-sha")
+        if [ -n "$FI_REMOTE_SHA" ] && [ "$FI_REMOTE_SHA" != "$FI_LOCAL_SHA" ]; then
+            echo "  ✗ FlashInfer  — stale (local: ${FI_LOCAL_SHA:0:8}, remote: ${FI_REMOTE_SHA:0:8})"
+            STALE=$((STALE + 1))
+        else
+            echo "  ✓ FlashInfer  — up to date (${FI_LOCAL_SHA:0:8})"
+        fi
+    else
+        echo "  ✗ FlashInfer  — no wheels found"
+        STALE=$((STALE + 1))
+    fi
+
+    # vLLM
+    if compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
+        VLLM_REMOTE_SHA=$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")
+        VLLM_LOCAL_SHA=""
+        [ -f "./wheels/.vllm-sha" ] && VLLM_LOCAL_SHA=$(cat "./wheels/.vllm-sha")
+        if [ -n "$VLLM_REMOTE_SHA" ] && [ "$VLLM_REMOTE_SHA" != "$VLLM_LOCAL_SHA" ]; then
+            echo "  ✗ vLLM        — stale (local: ${VLLM_LOCAL_SHA:0:8}, remote: ${VLLM_REMOTE_SHA:0:8})"
+            STALE=$((STALE + 1))
+        else
+            echo "  ✓ vLLM        — up to date (${VLLM_LOCAL_SHA:0:8})"
+        fi
+    else
+        echo "  ✗ vLLM        — no wheels found"
+        STALE=$((STALE + 1))
+    fi
+
+    # CUTLASS
+    CUTLASS_LATEST=$(git ls-remote --tags --sort=-v:refname "$CUTLASS_REPO" "refs/tags/v*" 2>/dev/null \
+        | grep -v '{}' | head -1 | sed 's|.*/||')
+    if [ -n "$CUTLASS_LATEST" ] && [ "$CUTLASS_LATEST" != "$CUTLASS_REF" ]; then
+        echo "  ✗ CUTLASS     — pinned $CUTLASS_REF, latest $CUTLASS_LATEST"
+        STALE=$((STALE + 1))
+    else
+        echo "  ✓ CUTLASS     — $CUTLASS_REF is latest"
+    fi
+
+    # NGC base image (query Docker registry for latest tag)
+    NGC_LATEST=""
+    NGC_TOKEN=$(curl -s "https://nvcr.io/proxy_auth?scope=repository:nvidia/pytorch:pull" 2>/dev/null \
+        | grep -oP '"token"\s*:\s*"\K[^"]+')
+    if [ -n "$NGC_TOKEN" ]; then
+        NGC_LATEST=$(curl -s -H "Authorization: Bearer $NGC_TOKEN" \
+            "https://nvcr.io/v2/nvidia/pytorch/tags/list" 2>/dev/null \
+            | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+tags = [t for t in data.get('tags', []) if t.endswith('-py3') and not any(x in t for x in ['igpu', 'arm', 'qnx'])]
+tags.sort()
+print(tags[-1] if tags else '')
+" 2>/dev/null)
+    fi
+    if [ -n "$NGC_LATEST" ] && [ "$NGC_LATEST" != "$NGC_TAG" ]; then
+        echo "  ✗ NGC Image   — using $NGC_TAG, latest $NGC_LATEST"
+        STALE=$((STALE + 1))
+    elif [ -n "$NGC_LATEST" ]; then
+        echo "  ✓ NGC Image   — $NGC_TAG is latest"
+    else
+        echo "  ? NGC Image   — could not check (registry unreachable)"
+    fi
+
+    echo "========================================="
+    if [ "$STALE" -gt 0 ]; then
+        echo "$STALE component(s) are stale."
+        exit 1
+    else
+        echo "Everything is up to date."
+        exit 0
+    fi
+fi
+
 # Common build flags
 COMMON_BUILD_FLAGS=()
 if [ "$FULL_LOG" = true ]; then
@@ -193,12 +215,19 @@ BUILD_FLASHINFER=false
 if [ "$REBUILD_FLASHINFER" = true ]; then
     echo "Rebuilding FlashInfer wheels (--rebuild-flashinfer specified)..."
     BUILD_FLASHINFER=true
-elif try_download_wheels "$FLASHINFER_RELEASE_TAG" "flashinfer"; then
-    echo "FlashInfer wheels ready."
 elif compgen -G "./wheels/flashinfer*.whl" > /dev/null 2>&1; then
-    echo "Download failed — using existing local FlashInfer wheels."
+    # Wheels exist locally — check if upstream has new commits
+    FI_REMOTE_SHA=$(resolve_remote_sha "$FLASHINFER_REPO" "$FLASHINFER_REF")
+    FI_LOCAL_SHA=""
+    [ -f "./wheels/.flashinfer-sha" ] && FI_LOCAL_SHA=$(cat "./wheels/.flashinfer-sha")
+    if [ -n "$FI_REMOTE_SHA" ] && [ "$FI_REMOTE_SHA" != "$FI_LOCAL_SHA" ]; then
+        echo "FlashInfer has upstream changes (${FI_REMOTE_SHA:0:8}) — rebuilding..."
+        BUILD_FLASHINFER=true
+    else
+        echo "FlashInfer wheels are up to date."
+    fi
 else
-    echo "No FlashInfer wheels available (download failed) — building..."
+    echo "No FlashInfer wheels available — building..."
     BUILD_FLASHINFER=true
 fi
 
@@ -213,13 +242,9 @@ if [ "$BUILD_FLASHINFER" = true ]; then
     FI_CMD=("docker" "build"
         "--target" "flashinfer-export"
         "--output" "type=local,dest=./wheels"
-        "${COMMON_BUILD_FLAGS[@]}")
-
-    if [ "$REBUILD_FLASHINFER" = true ]; then
-        FI_CMD+=("--build-arg" "CACHEBUST_FLASHINFER=$(date +%s)")
-    fi
-
-    FI_CMD+=(".")
+        "${COMMON_BUILD_FLAGS[@]}"
+        "--build-arg" "CACHEBUST_FLASHINFER=$(date +%s)"
+        ".")
 
     echo "FlashInfer build command: ${FI_CMD[*]}"
     FI_START=$(date +%s)
@@ -227,6 +252,9 @@ if [ "$BUILD_FLASHINFER" = true ]; then
         FI_END=$(date +%s)
         FLASHINFER_BUILD_TIME=$((FI_END - FI_START))
         rm -rf "$FI_BACKUP"
+        # Save the SHA we built from
+        FI_REMOTE_SHA=${FI_REMOTE_SHA:-$(resolve_remote_sha "$FLASHINFER_REPO" "$FLASHINFER_REF")}
+        [ -n "$FI_REMOTE_SHA" ] && echo "$FI_REMOTE_SHA" > ./wheels/.flashinfer-sha
     else
         echo "FlashInfer build failed — restoring previous wheels..."
         mv "$FI_BACKUP"/flashinfer*.whl ./wheels/ 2>/dev/null || true
@@ -245,6 +273,17 @@ fi
 
 if [ "$VLLM_REF_SET" = true ] || [ -n "$VLLM_PRS" ]; then
     REBUILD_VLLM=true
+fi
+
+# Check if upstream has new commits
+if [ "$REBUILD_VLLM" = false ] && [ "$VLLM_WHEELS_EXIST" = true ]; then
+    VLLM_REMOTE_SHA=$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")
+    VLLM_LOCAL_SHA=""
+    [ -f "./wheels/.vllm-sha" ] && VLLM_LOCAL_SHA=$(cat "./wheels/.vllm-sha")
+    if [ -n "$VLLM_REMOTE_SHA" ] && [ "$VLLM_REMOTE_SHA" != "$VLLM_LOCAL_SHA" ]; then
+        echo "vLLM has upstream changes (${VLLM_REMOTE_SHA:0:8}) — rebuilding..."
+        REBUILD_VLLM=true
+    fi
 fi
 
 if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
@@ -273,11 +312,8 @@ if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
         "--target" "vllm-export"
         "--output" "type=local,dest=./wheels"
         "${COMMON_BUILD_FLAGS[@]}"
-        "--build-arg" "VLLM_REF=$VLLM_REF")
-
-    if [ "$REBUILD_VLLM" = true ]; then
-        VLLM_CMD+=("--build-arg" "CACHEBUST_VLLM=$(date +%s)")
-    fi
+        "--build-arg" "VLLM_REF=$VLLM_REF"
+        "--build-arg" "CACHEBUST_VLLM=$(date +%s)")
 
     if [ -n "$VLLM_PRS" ]; then
         echo "Applying vLLM PRs: $VLLM_PRS"
@@ -292,6 +328,9 @@ if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
         VLLM_END=$(date +%s)
         VLLM_BUILD_TIME=$((VLLM_END - VLLM_START))
         rm -rf "$VLLM_BACKUP"
+        # Save the SHA we built from
+        VLLM_REMOTE_SHA=${VLLM_REMOTE_SHA:-$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")}
+        [ -n "$VLLM_REMOTE_SHA" ] && echo "$VLLM_REMOTE_SHA" > ./wheels/.vllm-sha
     else
         echo "vLLM build failed — restoring previous wheels..."
         mv "$VLLM_BACKUP"/vllm*.whl ./wheels/ 2>/dev/null || true
@@ -299,7 +338,7 @@ if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
         exit 1
     fi
 else
-    echo "vLLM wheels already present in ./wheels/ — skipping build."
+    echo "vLLM wheels are up to date."
 fi
 
 # ----------------------------------------------------------

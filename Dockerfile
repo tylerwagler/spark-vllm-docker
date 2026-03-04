@@ -2,13 +2,14 @@
 
 # Limit build parallelism to reduce OOM situations
 ARG BUILD_JOBS=16
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
 
 # =========================================================
 # STAGE 1: Base Image (Installs Dependencies)
 # =========================================================
-FROM nvcr.io/nvidia/pytorch:26.02-py3 AS base
+FROM ${BASE_IMAGE} AS base
 
-# Build parallemism
+# Build parallelism
 ARG BUILD_JOBS
 ENV MAX_JOBS=${BUILD_JOBS}
 ENV CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
@@ -39,6 +40,10 @@ RUN apt update && \
     ccache \
     && rm -rf /var/lib/apt/lists/* \
     && pip install uv && pip uninstall -y flash-attn
+
+# Install shared build/runtime dependencies
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+     uv pip install nvidia-nvshmem-cu13 "apache-tvm-ffi<0.2"
 
 # Configure Ccache for CUDA/C++
 ENV PATH=/usr/lib/ccache:$PATH
@@ -72,9 +77,6 @@ ARG FLASHINFER_REF=main
 # --- CACHE BUSTER ---
 # Change this argument to force a re-download of FlashInfer
 ARG CACHEBUST_FLASHINFER=1
-
-RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-     uv pip install nvidia-nvshmem-cu13 "apache-tvm-ffi<0.2"
 
 # Smart Git Clone (Fetch changes instead of full re-clone)
 RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
@@ -129,9 +131,6 @@ FROM base AS vllm-builder
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 WORKDIR $VLLM_BASE_DIR
-
-RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-     uv pip install nvidia-nvshmem-cu13 "apache-tvm-ffi<0.2"
 
 # --- VLLM SOURCE CACHE BUSTER ---
 ARG CACHEBUST_VLLM=1
@@ -214,10 +213,11 @@ COPY --from=vllm-builder /workspace/wheels /
 # =========================================================
 # STAGE 6: Runner (Installs wheels from host ./wheels/)
 # =========================================================
-FROM nvcr.io/nvidia/pytorch:26.02-py3 AS runner
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS runner
 
 # Transferring build settings from build image because of ptxas/jit compilation during vLLM startup
-# Build parallemism
+# Build parallelism
 ARG BUILD_JOBS
 ENV MAX_JOBS=${BUILD_JOBS}
 ENV CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
@@ -270,20 +270,3 @@ ENV PATH=$VLLM_BASE_DIR:$PATH
 # Final extra deps
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install ray[default] fastsafetensors nvidia-nvshmem-cu13
-
-# Cleanup
-
-# Keeping it here for reference - this won't work as is without squashing layers
-# RUN uv pip uninstall absl-py apex argon2-cffi \
-#     argon2-cffi-bindings arrow asttokens astunparse async-lru audioread babel beautifulsoup4 \
-#     black bleach comm contourpy cycler datasets debugpy decorator defusedxml dllist dm-tree \
-#     execnet executing expecttest fastjsonschema fonttools fqdn gast hypothesis \
-#     ipykernel ipython ipython_pygments_lexers isoduration isort jedi joblib jupyter-events \
-#     jupyter-lsp jupyter_client jupyter_core jupyter_server jupyter_server_terminals jupyterlab \
-#     jupyterlab_code_formatter jupyterlab_code_formatter jupyterlab_pygments jupyterlab_server \
-#     jupyterlab_tensorboard_pro jupytext kiwisolver matplotlib matplotlib-inline matplotlib-inline \
-#     mistune ml_dtypes mock nbclient nbconvert nbformat nest-asyncio notebook notebook_shim \
-#     opt_einsum optree outlines_core overrides pandas pandocfilters parso pexpect polygraphy pooch \
-#     pyarrow pycocotools pytest-flakefinder pytest-rerunfailures pytest-shard pytest-xdist \
-#     scikit-learn scipy Send2Trash soundfile soupsieve soxr spin stack-data \
-#     wcwidth webcolors xdoctest Werkzeug
