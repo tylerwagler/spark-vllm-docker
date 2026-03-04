@@ -44,18 +44,7 @@ Build the container.
 **If you have only one DGX Spark:**
 
 ```bash
-./build-and-copy.sh
-```
-
-**On DGX Spark cluster:**
-
-Make sure you connect your Sparks together and enable passwordless SSH as described in NVidia's [Connect Two Sparks Playbook](https://build.nvidia.com/spark/connect-two-sparks/stacked-sparks). 
-You can also check out our new [Networking Guide](docs/NETWORKING.md).
-
-Then run the following command that will build and distribute image across the cluster.
-
-```bash
-./build-and-copy.sh -c
+./build.sh
 ```
 
 An initial build will take around 20-30 minutes, but subsequent builds will be faster. Precompiled vLLM wheels for DGX Spark will also be available soon.
@@ -183,7 +172,7 @@ Changed reasoning parser in Minimax for better compatibility with modern clients
 
 #### Completely Redesigned Build Process
 
-`build-and-copy.sh` now automatically downloads prebuilt FlashInfer wheels from the [GitHub releases](https://github.com/eugr/spark-vllm-docker/releases/tag/prebuilt-flashinfer-current) before falling back to a local build. This eliminates the need to compile FlashInfer from source on first use, which typically takes around 20 minutes.
+`build.sh` now automatically downloads prebuilt FlashInfer wheels from the [GitHub releases](https://github.com/eugr/spark-vllm-docker/releases/tag/prebuilt-flashinfer-current) before falling back to a local build. This eliminates the need to compile FlashInfer from source on first use, which typically takes around 20 minutes.
 
 The download logic:
 - If prebuilt wheels are available and newer than any locally cached version, they are downloaded automatically.
@@ -256,7 +245,7 @@ This mod was included in `qwen3-coder-next-fp8` recipe.
 
 #### Configurable GPU Architecture
 
-Added `--gpu-arch <arch>` flag to `build-and-copy.sh`. This allows specifying the target GPU architecture (e.g., `12.0f`) during the build process, instead of being hardcoded to `12.1a`. This argument controls both `TORCH_CUDA_ARCH_LIST` and `FLASHINFER_CUDA_ARCH_LIST` build arguments.
+Added `--gpu-arch <arch>` flag to `build.sh`. This allows specifying the target GPU architecture (e.g., `12.0f`) during the build process, instead of being hardcoded to `12.1a`. This argument controls both `TORCH_CUDA_ARCH_LIST` and `FLASHINFER_CUDA_ARCH_LIST` build arguments.
 
 ### 2026-02-10
 
@@ -317,14 +306,14 @@ Thanks @raphaelamorim for the contribution!
 
 #### Ability to apply vLLM PRs during build
 
-`./build-and-copy.sh` now supports ability to apply vLLM PRs to builds. PR is applied to the most recent vLLM commit (or specific vllm-ref if set). This does NOT apply to wheels build and MXFP4 special build!
+`./build.sh` now supports ability to apply vLLM PRs to builds. PR is applied to the most recent vLLM commit (or specific vllm-ref if set). This does NOT apply to wheels build and MXFP4 special build!
 
 To use, just specify `--apply-vllm-pr <pr_num>` in the arguments. Please note that it may fail depending on whether the PR needs a rebase for the specified vLLM reference/main branch. Use with caution!
 
 Example:
 
 ```bash
-./build-and-copy.sh -t vllm-node-20260204-pr31740 --apply-vllm-pr 31740 -c
+./build.sh -t vllm-node-20260204-pr31740 --apply-vllm-pr 31740
 ```
 
 ### 2026-02-02
@@ -404,7 +393,7 @@ See (this post on NVIDIA forums)[https://forums.developer.nvidia.com/t/make-glm-
 To use the mod, first build the container with Transformers 5 support (`--pre-tf`) flag, e.g.:
 
 ```bash
-./build-and-copy.sh -t vllm-node-tf5 --pre-tf -c
+./build.sh -t vllm-node-tf5 --pre-tf
 ```
 
 Then, to run on a single node:
@@ -454,7 +443,7 @@ It is currently the fastest way to run GPT-OSS on DGX Spark, achieving 60 t/s on
 To use this build, first build the container with `--exp-mxfp4` flag. I recommend using a separate label as it is currently not recommended to use this build for models other than gpt-oss:
 
 ```bash
-./build-and-copy.sh -t vllm-node-mxfp4 --exp-mxfp4 -c
+./build.sh -t vllm-node-mxfp4 --exp-mxfp4
 ```
 
 Then, to run on a single Spark:
@@ -544,22 +533,22 @@ exec vllm serve Salyut1/GLM-4.7-NVFP4 \
 
 ### 2025-12-21
 
-- Added `--pre-tf` / `--pre-transformers` flag to `build-and-copy.sh` to install pre-release transformers (5.0.0rc or higher). Use it if you need to run GLM 4.6V or any other model that requires transformers 5.0. It may cause issues with other models, so you may want to stick to the release version for everything else.
+- Added `--pre-tf` / `--pre-transformers` flag to `build.sh` to install pre-release transformers (5.0.0rc or higher). Use it if you need to run GLM 4.6V or any other model that requires transformers 5.0. It may cause issues with other models, so you may want to stick to the release version for everything else.
 - Pre-built wheels now support release versions. Use with `--use-wheels release`.
 - Using nightly wheels or building from source is recommended for better performance.
 
 ### 2025-12-20
 
 - Limited ccache to 50G when building from source to reduce build cache size.
-- Added `--pre-flashinfer` flag to `build-and-copy.sh` to use pre-release versions of FlashInfer.
-- Added `--use-wheels [mode]` flag to `build-and-copy.sh`.
+- Added `--pre-flashinfer` flag to `build.sh` to use pre-release versions of FlashInfer.
+- Added `--use-wheels [mode]` flag to `build.sh`.
   - Allows building the container using pre-built vLLM wheels instead of compiling from source.
   - Reduced build time and container size.
   - `mode` is optional and defaults to `nightly`.
   - Supported modes: `nightly` (release wheels are broken with CUDA 13 currently). UPDATE: `release` also works now.
 ### 2025-12-19
 
-Updated `build-and-copy.sh` to support copying to multiple hosts (thanks @ericlewis for the contribution).
+Updated `build.sh` to support copying to multiple hosts (thanks @ericlewis for the contribution).
 - Added `-c, --copy-to` (accepts space- or comma-separated host lists) and kept `--copy-to-host` as a backward-compatible alias.
 - Added `--copy-parallel` to copy to all hosts concurrently.
 - Added autodiscovery support: if no hosts are provided to `--copy-to`, the script detects other cluster nodes automatically.
@@ -568,12 +557,12 @@ Updated `build-and-copy.sh` to support copying to multiple hosts (thanks @ericle
 ### 2025-12-18
 
 - Added `launch-cluster.sh` convenience script for basic cluster management - see details below.
-- Added `-j` / `--build-jobs` argument to `build-and-copy.sh` to control build parallelism.
+- Added `-j` / `--build-jobs` argument to `build.sh` to control build parallelism.
 - Added `--nccl-debug` option to specify NCCL debug level. Default is none to decrease verbosity.
 
 ### 2025-12-15
 
-Updated `build-and-copy.sh` flags:
+Updated `build.sh` flags:
 - Renamed `--triton-sha` to `--triton-ref` to support branches and tags in addition to commit SHAs.
 - Added `--vllm-ref <ref>`: Specify vLLM commit SHA, branch or tag (defaults to `main`).
 
@@ -581,11 +570,11 @@ Updated `build-and-copy.sh` flags:
 
 Converted to multi-stage Docker build with improved build times and reduced final image size. The builder stage is now separate from the runtime stage, excluding unnecessary build tools from the final image.
 
-Added timing statistics to `build-and-copy.sh` to track Docker build and image copy durations, displaying a summary at the end.
+Added timing statistics to `build.sh` to track Docker build and image copy durations, displaying a summary at the end.
 
 Triton is now being built from the source, alongside with its companion triton_kernels package. The Triton version is set to v3.5.1 by default, but it can be changed by using `--triton-sha` parameter.
 
-Added new flags to `build-and-copy.sh`:
+Added new flags to `build.sh`:
 - `--triton-sha <sha>`: Specify Triton commit SHA (defaults to v3.5.1 currently)
 - `--no-build`: Skip building and only copy existing image (requires `--copy-to`)
 
@@ -600,7 +589,7 @@ See [this issue](https://github.com/vllm-project/vllm/issues/30445) for details.
 
 ### 2025-12-05
 
-Added `build-and-copy.sh` for convenience.
+Added `build.sh` for convenience.
 
 ### 2025-11-26
 
@@ -616,82 +605,36 @@ Building the container manually is no longer supported due to Dockerfile complex
 
 ### Using the Build Script
 
-The `build-and-copy.sh` script automates the build process and optionally copies the image to one or more nodes. This is the officially supported method for building and deploying to multiple Spark nodes.
+The `build.sh` script automates the build process. This is the officially supported method for building.
 
 **Basic usage (build only):**
 
 ```bash
-./build-and-copy.sh
+./build.sh
 ```
 
 **Build with a custom tag:**
 
 ```bash
-./build-and-copy.sh -t my-vllm-node
-```
-
-**Build and copy to Spark node(s):**
-
-Using the same username as currently logged-in user (single host):
-
-```bash
-./build-and-copy.sh --copy-to 192.168.177.12
-```
-
-Copy to multiple hosts (space- or comma-separated after the flag):
-
-```bash
-./build-and-copy.sh --copy-to 192.168.177.12 192.168.177.13
-```
-
-Copy to multiple hosts in parallel:
-
-```bash
-./build-and-copy.sh --copy-to 192.168.177.12 192.168.177.13 --copy-parallel
-```
-
-**Build and copy using autodiscovery:**
-
-If you omit the host list after `--copy-to`, the script will attempt to auto-discover other nodes in the cluster (excluding the current node) and copy the image to them.
-
-```bash
-./build-and-copy.sh --copy-to
-```
-
-Using a different username:
-
-```bash
-./build-and-copy.sh --copy-to 192.168.177.12 --user your_username
+./build.sh -t my-vllm-node
 ```
 
 **Force rebuild vLLM from source:**
 
 ```bash
-./build-and-copy.sh --rebuild-vllm
+./build.sh --rebuild-vllm
 ```
 
 **Force rebuild FlashInfer from source (skips prebuilt wheel download):**
 
 ```bash
-./build-and-copy.sh --rebuild-flashinfer
-```
-
-**Combined example (rebuild vLLM and copy to another node):**
-
-```bash
-./build-and-copy.sh --rebuild-vllm -c 192.168.177.12
+./build.sh --rebuild-flashinfer
 ```
 
 **Build for specific GPU architecture:**
 
 ```bash
-./build-and-copy.sh --gpu-arch 12.0f
-```
-
-**Copy existing image without rebuilding:**
-
-```bash
-./build-and-copy.sh --no-build --copy-to 192.168.177.12
+./build.sh --gpu-arch 12.0f
 ```
 
 **Available options:**
@@ -704,18 +647,9 @@ Using a different username:
 | `--rebuild-vllm` | Force rebuild vLLM from source |
 | `--vllm-ref <ref>` | vLLM commit SHA, branch or tag (default: `main`) |
 | `--apply-vllm-pr <pr-num>` | Apply a vLLM PR patch during build. Can be specified multiple times. |
-| `--tf5` | Install transformers v5 (5.0.0 or higher). Aliases: `--pre-tf, --pre-transformers`. |
-| `--exp-mxfp4` | Build with experimental native MXFP4 support. Alias: `--experimental-mxfp4`. |
-| `-c, --copy-to <hosts>` | Host(s) to copy the image to after building (space- or comma-separated). |
-| `--copy-to-host` | Alias for `--copy-to` (backwards compatibility). |
-| `--copy-parallel` | Copy to all specified hosts concurrently. |
 | `-j, --build-jobs <jobs>` | Number of parallel build jobs (default: 16) |
-| `-u, --user <user>` | Username for SSH connection (default: current user) |
 | `--full-log` | Enable full Docker build output (`--progress=plain`) |
-| `--no-build` | Skip building, only copy existing image (requires `--copy-to`) |
 | `-h, --help` | Show help message |
-
-**IMPORTANT**: When copying to another node, make sure you use the Spark IP assigned to its ConnectX 7 interface (enp1s0f1np1), and not the 10G interface (enP7s7)! If you omit the IP address and use `-c` without addresses, it will use autodiscovery to detect a proper IP address.
 
 ### Copying the container to another Spark node (Manual Method)
 
@@ -1135,4 +1069,4 @@ The `hf-download.sh` script provides a convenient way to download models from Hu
 
 ### Hardware Architecture
 
-**Note:** This project targets `12.1a` architecture (NVIDIA GB10 / DGX Spark). If you are using different hardware, you can use `--gpu-arch` flag in `./build-and-copy.sh`.
+**Note:** This project targets `12.1a` architecture (NVIDIA GB10 / DGX Spark). If you are using different hardware, you can use `--gpu-arch` flag in `./build.sh`.

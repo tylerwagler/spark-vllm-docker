@@ -101,7 +101,7 @@ RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
 WORKDIR /workspace/flashinfer
 
 # Apply patch to avoid re-downloading existing cubins
-COPY flashinfer_cache.patch .
+COPY patches/flashinfer_cache.patch .
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=cubins-cache,target=/workspace/flashinfer/flashinfer-cubin/flashinfer_cubin/cubins \
@@ -200,14 +200,6 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     sed -i '/^fastsafetensors\b/d' requirements/test.txt && \
     uv pip install -r requirements/build.txt
 
-# Apply Patches
-# TEMPORARY PATCH for fastsafetensors loading in cluster setup - tracking https://github.com/vllm-project/vllm/issues/34180
-# COPY fastsafetensors.patch .
-# RUN if patch -p1 --dry-run --reverse < fastsafetensors.patch &>/dev/null; then \
-#         echo "PR #34180 is already applied"; \
-#     else \
-#         patch -p1 < fastsafetensors.patch; \
-#     fi
 # Final Compilation
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
@@ -259,18 +251,12 @@ RUN mkdir -p tiktoken_encodings && \
     wget -O tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken" && \
     wget -O tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
 
-ARG PRE_TRANSFORMERS=0
-
 # Install wheels from host ./wheels/ (bind-mounted from build context — no layer bloat)
-# With --tf5: override vLLM's transformers<5 constraint to get transformers>=5
+# Override vLLM's transformers<5 constraint to get transformers>=5
 RUN --mount=type=bind,source=wheels,target=/workspace/wheels \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    if [ "$PRE_TRANSFORMERS" = "1" ]; then \
-        echo "transformers>=5.0.0" > /tmp/tf-override.txt && \
-        uv pip install /workspace/wheels/*.whl --override /tmp/tf-override.txt; \
-    else \
-        uv pip install /workspace/wheels/*.whl; \
-    fi
+    echo "transformers>=5.0.0" > /tmp/tf-override.txt && \
+    uv pip install /workspace/wheels/*.whl --override /tmp/tf-override.txt
 
 # Setup environment for runtime
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
@@ -280,10 +266,6 @@ ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 ENV TIKTOKEN_ENCODINGS_BASE=$VLLM_BASE_DIR/tiktoken_encodings
 ENV PATH=$VLLM_BASE_DIR:$PATH
-
-# Copy scripts
-COPY run-cluster-node.sh $VLLM_BASE_DIR/
-RUN chmod +x $VLLM_BASE_DIR/run-cluster-node.sh
 
 # Final extra deps
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \

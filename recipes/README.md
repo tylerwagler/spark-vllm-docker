@@ -116,7 +116,7 @@ command: |
 description: What this recipe does
 model: org/model-name              # HuggingFace model ID for --setup downloads
 cluster_only: false                # Set to true if model requires cluster mode
-build_args:                        # Extra args for build-and-copy.sh
+build_args:                        # Extra args for build.sh
   - --pre-tf                       # e.g., for transformers 5.0
   - --exp-mxfp4                    # e.g., for MXFP4 Dockerfile
 mods:
@@ -133,7 +133,7 @@ env:
 
 ### Build Arguments
 
-The `build_args` field passes flags to `build-and-copy.sh`:
+The `build_args` field passes flags to `build.sh`:
 
 | Flag | Description |
 |------|-------------|
@@ -272,7 +272,7 @@ command: |
            │ calls (for build)      │ calls (for download)
            ▼                        ▼
 ┌──────────────────────┐  ┌───────────────────────────────┐
-│  build-and-copy.sh   │  │  hf-download.sh               │
+│  build.sh   │  │  hf-download.sh               │
 │  - Docker build      │  │  - HuggingFace model download │
 │  - Copy to workers   │  │  - Rsync to workers           │
 └──────────────────────┘  └───────────────────────────────┘
