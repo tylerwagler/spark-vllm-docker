@@ -20,7 +20,7 @@ VLLM_PRS=""
 PRE_TRANSFORMERS=false
 FULL_LOG=false
 BUILD_JOBS="16"
-GPU_ARCH_LIST="12.1a"
+GPU_ARCH_LIST=""
 WHEELS_REPO="eugr/spark-vllm-docker"
 FLASHINFER_RELEASE_TAG="prebuilt-flashinfer-current"
 # Space-separated list of GPU architectures for which prebuilt wheels are available
@@ -152,7 +152,7 @@ for a in assets:
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "  -t, --tag <tag>               : Image tag (default: 'vllm-node')"
-    echo "  --gpu-arch <arch>             : GPU architecture (default: '12.1a')"
+    echo "  --gpu-arch <arch>             : GPU architecture (default: auto-detect from nvidia-smi)"
     echo "  --rebuild-flashinfer          : Force rebuild of FlashInfer wheels (ignore cached wheels)"
     echo "  --rebuild-vllm                : Force rebuild of vLLM wheels (ignore cached wheels)"
     echo "  --vllm-ref <ref>              : vLLM commit SHA, branch or tag (default: 'main')"
@@ -232,6 +232,25 @@ while [[ "$#" -gt 0 ]]; do
     esac
     shift
 done
+
+# Auto-detect GPU architecture if not specified
+if [ -z "$GPU_ARCH_LIST" ]; then
+    if command -v nvidia-smi &>/dev/null; then
+        # Query all GPUs, deduplicate, format as "major.minor" with Blackwell+ getting "a" suffix
+        GPU_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sort -u | while read -r cap; do
+            major="${cap%%.*}"
+            if [ "$major" -ge 12 ]; then
+                echo "${cap}a"
+            else
+                echo "$cap"
+            fi
+        done | paste -sd ';')
+        echo "Auto-detected GPU architecture: $GPU_ARCH_LIST"
+    else
+        echo "Error: No GPU detected and --gpu-arch not specified."
+        exit 1
+    fi
+fi
 
 # Validate flag combinations
 if [ -n "$VLLM_PRS" ]; then

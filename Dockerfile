@@ -6,7 +6,7 @@ ARG BUILD_JOBS=16
 # =========================================================
 # STAGE 1: Base Image (Installs Dependencies)
 # =========================================================
-FROM nvcr.io/nvidia/pytorch:26.01-py3 AS base
+FROM nvcr.io/nvidia/pytorch:26.02-py3 AS base
 
 # Build parallemism
 ARG BUILD_JOBS
@@ -173,6 +173,25 @@ RUN if [ -n "$VLLM_PRS" ]; then \
         done; \
     fi
 
+# Override CUTLASS with a newer version (vLLM pins v4.2.1, we want latest for SM121/GB10 fixes)
+ARG CUTLASS_REF=v4.4.1
+RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
+    cd /repo-cache && \
+    if [ ! -d "cutlass" ]; then \
+        echo "Cache miss: Cloning CUTLASS from scratch..." && \
+        git clone https://github.com/NVIDIA/cutlass.git && \
+        cd cutlass && git checkout ${CUTLASS_REF}; \
+    else \
+        echo "Cache hit: Fetching CUTLASS updates..." && \
+        cd cutlass && \
+        git fetch origin && \
+        git fetch origin --tags --force && \
+        (git checkout --detach origin/${CUTLASS_REF} 2>/dev/null || git checkout ${CUTLASS_REF}) && \
+        git clean -fdx; \
+    fi && \
+    cp -a /repo-cache/cutlass /workspace/cutlass
+ENV VLLM_CUTLASS_SRC_DIR=/workspace/cutlass
+
 # Prepare build requirements
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     python3 use_existing_torch.py && \
@@ -189,10 +208,6 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 #     else \
 #         patch -p1 < fastsafetensors.patch; \
 #     fi
-# TEMPORARY PATCH for broken vLLM build (unguarded Hopper code) - reverting PR #34758 and #34302
-RUN curl -L https://patch-diff.githubusercontent.com/raw/vllm-project/vllm/pull/34758.diff | patch -p1 -R || echo "Cannot revert PR #34758, skipping"
-RUN curl -L https://patch-diff.githubusercontent.com/raw/vllm-project/vllm/pull/34302.diff | patch -p1 -R || echo "Cannot revert PR #34302, skipping"
-
 # Final Compilation
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
@@ -207,7 +222,7 @@ COPY --from=vllm-builder /workspace/wheels /
 # =========================================================
 # STAGE 6: Runner (Installs wheels from host ./wheels/)
 # =========================================================
-FROM nvcr.io/nvidia/pytorch:26.01-py3 AS runner
+FROM nvcr.io/nvidia/pytorch:26.02-py3 AS runner
 
 # Transferring build settings from build image because of ptxas/jit compilation during vLLM startup
 # Build parallemism
@@ -219,7 +234,7 @@ ENV MAKEFLAGS="-j${BUILD_JOBS}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
-ENV VLLM_BASE_DIR=/workspace/vllm
+ARG VLLM_BASE_DIR=/workspace/vllm
 
 # Set pip cache directory
 ENV PIP_CACHE_DIR=/root/.cache/pip
