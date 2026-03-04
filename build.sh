@@ -6,7 +6,6 @@ START_TIME=$(date +%s)
 
 # Default values
 IMAGE_TAG="vllm-node"
-REBUILD_FLASHINFER=false
 REBUILD_VLLM=false
 VLLM_REF="main"
 VLLM_REF_SET=false
@@ -17,8 +16,6 @@ GPU_ARCH_LIST=""
 
 CHECK_ONLY=false
 
-FLASHINFER_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-FLASHINFER_REF="main"
 VLLM_REPO="https://github.com/vllm-project/vllm.git"
 CUTLASS_REPO="https://github.com/NVIDIA/cutlass.git"
 CUTLASS_REF="v4.4.1"
@@ -43,7 +40,6 @@ usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "  -t, --tag <tag>               : Image tag (default: 'vllm-node')"
     echo "  --gpu-arch <arch>             : GPU architecture (default: auto-detect from nvidia-smi)"
-    echo "  --rebuild-flashinfer          : Force rebuild of FlashInfer wheels (ignore cached wheels)"
     echo "  --rebuild-vllm                : Force rebuild of vLLM wheels (ignore cached wheels)"
     echo "  --vllm-ref <ref>              : vLLM commit SHA, branch or tag (default: 'main')"
     echo "  -j, --build-jobs <jobs>       : Number of concurrent build jobs (default: ${BUILD_JOBS})"
@@ -59,7 +55,6 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         -t|--tag) IMAGE_TAG="$2"; shift ;;
         --gpu-arch) GPU_ARCH_LIST="$2"; shift ;;
-        --rebuild-flashinfer) REBUILD_FLASHINFER=true ;;
         --rebuild-vllm) REBUILD_VLLM=true ;;
         --vllm-ref) VLLM_REF="$2"; VLLM_REF_SET=true; shift ;;
         -j|--build-jobs) BUILD_JOBS="$2"; shift ;;
@@ -115,22 +110,6 @@ if [ "$CHECK_ONLY" = true ]; then
     echo "         STALENESS CHECK"
     echo "========================================="
     STALE=0
-
-    # FlashInfer
-    if compgen -G "./wheels/flashinfer*.whl" > /dev/null 2>&1; then
-        FI_REMOTE_SHA=$(resolve_remote_sha "$FLASHINFER_REPO" "$FLASHINFER_REF")
-        FI_LOCAL_SHA=""
-        [ -f "./wheels/.flashinfer-sha" ] && FI_LOCAL_SHA=$(cat "./wheels/.flashinfer-sha")
-        if [ -n "$FI_REMOTE_SHA" ] && [ "$FI_REMOTE_SHA" != "$FI_LOCAL_SHA" ]; then
-            echo "  ✗ FlashInfer  — stale (local: ${FI_LOCAL_SHA:0:8}, remote: ${FI_REMOTE_SHA:0:8})"
-            STALE=$((STALE + 1))
-        else
-            echo "  ✓ FlashInfer  — up to date (${FI_LOCAL_SHA:0:8})"
-        fi
-    else
-        echo "  ✗ FlashInfer  — no wheels found"
-        STALE=$((STALE + 1))
-    fi
 
     # vLLM
     if compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
@@ -199,72 +178,15 @@ if [ "$FULL_LOG" = true ]; then
 fi
 COMMON_BUILD_FLAGS+=("--build-arg" "BUILD_JOBS=$BUILD_JOBS")
 COMMON_BUILD_FLAGS+=("--build-arg" "TORCH_CUDA_ARCH_LIST=$GPU_ARCH_LIST")
-COMMON_BUILD_FLAGS+=("--build-arg" "FLASHINFER_CUDA_ARCH_LIST=$GPU_ARCH_LIST")
 
 # =====================================================
 # Build image
 # =====================================================
-FLASHINFER_BUILD_TIME=0
 VLLM_BUILD_TIME=0
 RUNNER_BUILD_TIME=0
 
 # ----------------------------------------------------------
-# Phase 1: FlashInfer wheels
-# ----------------------------------------------------------
-BUILD_FLASHINFER=false
-if [ "$REBUILD_FLASHINFER" = true ]; then
-    echo "Rebuilding FlashInfer wheels (--rebuild-flashinfer specified)..."
-    BUILD_FLASHINFER=true
-elif compgen -G "./wheels/flashinfer*.whl" > /dev/null 2>&1; then
-    # Wheels exist locally — check if upstream has new commits
-    FI_REMOTE_SHA=$(resolve_remote_sha "$FLASHINFER_REPO" "$FLASHINFER_REF")
-    FI_LOCAL_SHA=""
-    [ -f "./wheels/.flashinfer-sha" ] && FI_LOCAL_SHA=$(cat "./wheels/.flashinfer-sha")
-    if [ -n "$FI_REMOTE_SHA" ] && [ "$FI_REMOTE_SHA" != "$FI_LOCAL_SHA" ]; then
-        echo "FlashInfer has upstream changes (${FI_REMOTE_SHA:0:8}) — rebuilding..."
-        BUILD_FLASHINFER=true
-    else
-        echo "FlashInfer wheels are up to date."
-    fi
-else
-    echo "No FlashInfer wheels available — building..."
-    BUILD_FLASHINFER=true
-fi
-
-if [ "$BUILD_FLASHINFER" = true ]; then
-    # Back up existing flashinfer wheels; restore them if the build fails
-    FI_BACKUP="./wheels/.backup-flashinfer"
-    rm -rf "$FI_BACKUP" && mkdir -p "$FI_BACKUP"
-    for f in ./wheels/flashinfer*.whl; do
-        [ -f "$f" ] && mv "$f" "$FI_BACKUP/"
-    done
-
-    FI_CMD=("docker" "build"
-        "--target" "flashinfer-export"
-        "--output" "type=local,dest=./wheels"
-        "${COMMON_BUILD_FLAGS[@]}"
-        "--build-arg" "CACHEBUST_FLASHINFER=$(date +%s)"
-        ".")
-
-    echo "FlashInfer build command: ${FI_CMD[*]}"
-    FI_START=$(date +%s)
-    if "${FI_CMD[@]}"; then
-        FI_END=$(date +%s)
-        FLASHINFER_BUILD_TIME=$((FI_END - FI_START))
-        rm -rf "$FI_BACKUP"
-        # Save the SHA we built from
-        FI_REMOTE_SHA=${FI_REMOTE_SHA:-$(resolve_remote_sha "$FLASHINFER_REPO" "$FLASHINFER_REF")}
-        [ -n "$FI_REMOTE_SHA" ] && echo "$FI_REMOTE_SHA" > ./wheels/.flashinfer-sha
-    else
-        echo "FlashInfer build failed — restoring previous wheels..."
-        mv "$FI_BACKUP"/flashinfer*.whl ./wheels/ 2>/dev/null || true
-        rm -rf "$FI_BACKUP"
-        exit 1
-    fi
-fi
-
-# ----------------------------------------------------------
-# Phase 2: vLLM wheels
+# Phase 1: vLLM wheels
 # ----------------------------------------------------------
 VLLM_WHEELS_EXIST=false
 if compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
@@ -311,9 +233,9 @@ if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
     VLLM_CMD=("docker" "build"
         "--target" "vllm-export"
         "--output" "type=local,dest=./wheels"
+        "--no-cache-filter" "vllm-builder"
         "${COMMON_BUILD_FLAGS[@]}"
-        "--build-arg" "VLLM_REF=$VLLM_REF"
-        "--build-arg" "CACHEBUST_VLLM=$(date +%s)")
+        "--build-arg" "VLLM_REF=$VLLM_REF")
 
     if [ -n "$VLLM_PRS" ]; then
         echo "Applying vLLM PRs: $VLLM_PRS"
@@ -342,7 +264,7 @@ else
 fi
 
 # ----------------------------------------------------------
-# Phase 3: Runner image
+# Phase 2: Runner image
 # ----------------------------------------------------------
 if ! compgen -G "./wheels/*.whl" > /dev/null 2>&1; then
     echo "Error: No wheel files found in ./wheels/ — cannot build runner image."
@@ -369,9 +291,6 @@ echo ""
 echo "========================================="
 echo "         TIMING STATISTICS"
 echo "========================================="
-if [ "$FLASHINFER_BUILD_TIME" -gt 0 ]; then
-    echo "FlashInfer Build: $(printf '%02d:%02d:%02d' $((FLASHINFER_BUILD_TIME/3600)) $((FLASHINFER_BUILD_TIME%3600/60)) $((FLASHINFER_BUILD_TIME%60)))"
-fi
 if [ "$VLLM_BUILD_TIME" -gt 0 ]; then
     echo "vLLM Build:       $(printf '%02d:%02d:%02d' $((VLLM_BUILD_TIME/3600)) $((VLLM_BUILD_TIME%3600/60)) $((VLLM_BUILD_TIME%60)))"
 fi

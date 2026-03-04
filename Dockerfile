@@ -65,66 +65,7 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
 # =========================================================
-# STAGE 2: FlashInfer Builder
-# =========================================================
-FROM base AS flashinfer-builder
-
-ARG FLASHINFER_CUDA_ARCH_LIST="12.1a"
-ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
-WORKDIR $VLLM_BASE_DIR
-ARG FLASHINFER_REF=main
-
-# --- CACHE BUSTER ---
-# Change this argument to force a re-download of FlashInfer
-ARG CACHEBUST_FLASHINFER=1
-
-# Smart Git Clone (Fetch changes instead of full re-clone)
-RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
-    cd /repo-cache && \
-    if [ ! -d "flashinfer" ]; then \
-        echo "Cache miss: Cloning FlashInfer from scratch..." && \
-        git clone --recursive https://github.com/flashinfer-ai/flashinfer.git; \
-        if [ "$FLASHINFER_REF" != "main" ]; then \
-            cd flashinfer && \
-            git checkout ${FLASHINFER_REF}; \
-        fi; \
-    else \
-        echo "Cache hit: Fetching flashinfer updates..." && \
-        cd flashinfer && \
-        git fetch origin && \
-        git fetch origin --tags --force && \
-        (git checkout --detach origin/${FLASHINFER_REF} 2>/dev/null || git checkout ${FLASHINFER_REF}) && \
-        git submodule update --init --recursive && \
-        git clean -fdx && \
-        git gc --auto; \
-    fi && \
-    cp -a /repo-cache/flashinfer /workspace/flashinfer
-
-WORKDIR /workspace/flashinfer
-
-# Apply patch to avoid re-downloading existing cubins
-COPY patches/flashinfer_cache.patch .
-RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    --mount=type=cache,id=ccache,target=/root/.ccache \
-    --mount=type=cache,id=cubins-cache,target=/workspace/flashinfer/flashinfer-cubin/flashinfer_cubin/cubins \
-    patch -p1 < flashinfer_cache.patch && \
-    # flashinfer-python
-    sed -i -e 's/license = "Apache-2.0"/license = { text = "Apache-2.0" }/' -e '/license-files/d' pyproject.toml && \
-    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
-    # flashinfer-cubin
-    cd flashinfer-cubin && uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
-    # flashinfer-jit-cache
-    cd ../flashinfer-jit-cache && \
-    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v
-
-# =========================================================
-# STAGE 3: FlashInfer Wheel Export
-# =========================================================
-FROM scratch AS flashinfer-export
-COPY --from=flashinfer-builder /workspace/wheels /
-
-# =========================================================
-# STAGE 4: vLLM Builder
+# STAGE 2: vLLM Builder
 # =========================================================
 FROM base AS vllm-builder
 
@@ -132,31 +73,28 @@ ARG TORCH_CUDA_ARCH_LIST="12.1a"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 WORKDIR $VLLM_BASE_DIR
 
-# --- VLLM SOURCE CACHE BUSTER ---
-ARG CACHEBUST_VLLM=1
-
 # Git reference (branch, tag, or SHA) to checkout
 ARG VLLM_REF=main
 
-# Smart Git Clone (Fetch changes instead of full re-clone)
+# Smart Git Clone — shallow to minimize clone/fetch time
 RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
     cd /repo-cache && \
     if [ ! -d "vllm" ]; then \
-        echo "Cache miss: Cloning vLLM from scratch..." && \
-        git clone --recursive https://github.com/vllm-project/vllm.git; \
+        echo "Cache miss: Cloning vLLM (shallow)..." && \
+        git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/vllm-project/vllm.git && \
         if [ "$VLLM_REF" != "main" ]; then \
             cd vllm && \
-            git checkout ${VLLM_REF}; \
+            git fetch --depth 1 origin ${VLLM_REF} && \
+            git checkout FETCH_HEAD; \
         fi; \
     else \
-        echo "Cache hit: Fetching updates..." && \
+        echo "Cache hit: Fetching vLLM updates (shallow)..." && \
         cd vllm && \
-        git fetch origin && \
-        git fetch origin --tags --force && \
-        (git checkout --detach origin/${VLLM_REF} 2>/dev/null || git checkout ${VLLM_REF}) && \
+        git fetch --depth 1 origin ${VLLM_REF} && \
+        git checkout FETCH_HEAD && \
         git submodule update --init --recursive && \
-        git clean -fdx && \
-        git gc --auto; \
+        git clean -fdx; \
     fi && \
     cp -a /repo-cache/vllm $VLLM_BASE_DIR/
 
@@ -177,15 +115,14 @@ ARG CUTLASS_REF=v4.4.1
 RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
     cd /repo-cache && \
     if [ ! -d "cutlass" ]; then \
-        echo "Cache miss: Cloning CUTLASS from scratch..." && \
-        git clone https://github.com/NVIDIA/cutlass.git && \
+        echo "Cache miss: Cloning CUTLASS (shallow)..." && \
+        git clone --depth 1 https://github.com/NVIDIA/cutlass.git && \
         cd cutlass && git checkout ${CUTLASS_REF}; \
     else \
-        echo "Cache hit: Fetching CUTLASS updates..." && \
+        echo "Cache hit: Fetching CUTLASS updates (shallow)..." && \
         cd cutlass && \
-        git fetch origin && \
-        git fetch origin --tags --force && \
-        (git checkout --detach origin/${CUTLASS_REF} 2>/dev/null || git checkout ${CUTLASS_REF}) && \
+        git fetch --depth 1 origin tag ${CUTLASS_REF} && \
+        git checkout FETCH_HEAD && \
         git clean -fdx; \
     fi && \
     cp -a /repo-cache/cutlass /workspace/cutlass
@@ -202,16 +139,17 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 # Final Compilation
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v
+    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
+    echo "=== ccache stats ===" && ccache -s
 
 # =========================================================
-# STAGE 5: vLLM Wheel Export
+# STAGE 3: vLLM Wheel Export
 # =========================================================
 FROM scratch AS vllm-export
 COPY --from=vllm-builder /workspace/wheels /
 
 # =========================================================
-# STAGE 6: Runner (Installs wheels from host ./wheels/)
+# STAGE 4: Runner (Installs wheels from host ./wheels/)
 # =========================================================
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE} AS runner
@@ -261,12 +199,11 @@ RUN --mount=type=bind,source=wheels,target=/workspace/wheels \
 # Setup environment for runtime
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
-ARG FLASHINFER_CUDA_ARCH_LIST="12.1a"
-ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 ENV TIKTOKEN_ENCODINGS_BASE=$VLLM_BASE_DIR/tiktoken_encodings
 ENV PATH=$VLLM_BASE_DIR:$PATH
 
 # Final extra deps
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv pip install ray[default] fastsafetensors nvidia-nvshmem-cu13
+    uv pip install ray[default] fastsafetensors nvidia-nvshmem-cu13 \
+        flashinfer-python flashinfer-cubin
