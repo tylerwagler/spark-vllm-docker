@@ -116,8 +116,7 @@ RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
     cd /repo-cache && \
     if [ ! -d "cutlass" ]; then \
         echo "Cache miss: Cloning CUTLASS (shallow)..." && \
-        git clone --depth 1 https://github.com/NVIDIA/cutlass.git && \
-        cd cutlass && git checkout ${CUTLASS_REF}; \
+        git clone --depth 1 --branch ${CUTLASS_REF} https://github.com/NVIDIA/cutlass.git; \
     else \
         echo "Cache hit: Fetching CUTLASS updates (shallow)..." && \
         cd cutlass && \
