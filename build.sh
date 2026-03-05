@@ -35,6 +35,22 @@ resolve_remote_sha() {
     echo "$sha"
 }
 
+# Check if this system requires building vLLM from source.
+# Returns 0 (true) if source build is needed, 1 (false) if prebuilt wheels work.
+requires_source_build() {
+    # Custom PRs require source build
+    [ -n "$VLLM_PRS" ] && return 0
+    # Custom ref requires source build
+    [ "$VLLM_REF_SET" = true ] && return 0
+    # SM 12.x+ GPUs need unmerged upstream patches + custom CUTLASS
+    for arch in $(echo "$GPU_ARCH_LIST" | tr ';' ' '); do
+        local major="${arch%%.*}"
+        major="${major%a}"
+        [ "$major" -ge 12 ] && return 0
+    done
+    return 1
+}
+
 # Help function
 usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -111,30 +127,47 @@ if [ "$CHECK_ONLY" = true ]; then
     echo "========================================="
     STALE=0
 
-    # vLLM
-    if compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
-        VLLM_REMOTE_SHA=$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")
-        VLLM_LOCAL_SHA=""
-        [ -f "./wheels/.vllm-sha" ] && VLLM_LOCAL_SHA=$(cat "./wheels/.vllm-sha")
-        if [ -n "$VLLM_REMOTE_SHA" ] && [ "$VLLM_REMOTE_SHA" != "$VLLM_LOCAL_SHA" ]; then
-            echo "  ✗ vLLM        — stale (local: ${VLLM_LOCAL_SHA:0:8}, remote: ${VLLM_REMOTE_SHA:0:8})"
+    if requires_source_build; then
+        echo "  Build mode: source (GPU arch $GPU_ARCH_LIST)"
+        echo ""
+
+        # vLLM — SHA-based staleness
+        if compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
+            VLLM_REMOTE_SHA=$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")
+            VLLM_LOCAL_SHA=""
+            [ -f "./wheels/.vllm-sha" ] && VLLM_LOCAL_SHA=$(cat "./wheels/.vllm-sha")
+            if [ -n "$VLLM_REMOTE_SHA" ] && [ "$VLLM_REMOTE_SHA" != "$VLLM_LOCAL_SHA" ]; then
+                echo "  ✗ vLLM        — stale (local: ${VLLM_LOCAL_SHA:0:8}, remote: ${VLLM_REMOTE_SHA:0:8})"
+                STALE=$((STALE + 1))
+            else
+                echo "  ✓ vLLM        — up to date (${VLLM_LOCAL_SHA:0:8})"
+            fi
+        else
+            echo "  ✗ vLLM        — no wheels found"
+            STALE=$((STALE + 1))
+        fi
+
+        # CUTLASS — only relevant for source builds
+        CUTLASS_LATEST=$(git ls-remote --tags --sort=-v:refname "$CUTLASS_REPO" "refs/tags/v*" 2>/dev/null \
+            | grep -v '{}' | head -1 | sed 's|.*/||')
+        if [ -n "$CUTLASS_LATEST" ] && [ "$CUTLASS_LATEST" != "$CUTLASS_REF" ]; then
+            echo "  ✗ CUTLASS     — pinned $CUTLASS_REF, latest $CUTLASS_LATEST"
             STALE=$((STALE + 1))
         else
-            echo "  ✓ vLLM        — up to date (${VLLM_LOCAL_SHA:0:8})"
+            echo "  ✓ CUTLASS     — $CUTLASS_REF is latest"
         fi
     else
-        echo "  ✗ vLLM        — no wheels found"
-        STALE=$((STALE + 1))
-    fi
+        echo "  Build mode: prebuilt (GPU arch $GPU_ARCH_LIST)"
+        echo ""
 
-    # CUTLASS
-    CUTLASS_LATEST=$(git ls-remote --tags --sort=-v:refname "$CUTLASS_REPO" "refs/tags/v*" 2>/dev/null \
-        | grep -v '{}' | head -1 | sed 's|.*/||')
-    if [ -n "$CUTLASS_LATEST" ] && [ "$CUTLASS_LATEST" != "$CUTLASS_REF" ]; then
-        echo "  ✗ CUTLASS     — pinned $CUTLASS_REF, latest $CUTLASS_LATEST"
-        STALE=$((STALE + 1))
-    else
-        echo "  ✓ CUTLASS     — $CUTLASS_REF is latest"
+        # vLLM — just check if wheel is present
+        if compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
+            VLLM_WHL=$(basename ./wheels/vllm*.whl | head -1)
+            echo "  ✓ vLLM        — prebuilt wheel present ($VLLM_WHL)"
+        else
+            echo "  ✗ vLLM        — no prebuilt wheel (run build to download)"
+            STALE=$((STALE + 1))
+        fi
     fi
 
     # NGC base image (query Docker registry for latest tag)
@@ -193,74 +226,95 @@ if compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
     VLLM_WHEELS_EXIST=true
 fi
 
-if [ "$VLLM_REF_SET" = true ] || [ -n "$VLLM_PRS" ]; then
-    REBUILD_VLLM=true
-fi
+if requires_source_build; then
+    # ---- Source build path (SM 12.x+, custom PRs/ref) ----
+    echo "Source build required (GPU arch: $GPU_ARCH_LIST)"
 
-# Check if upstream has new commits
-if [ "$REBUILD_VLLM" = false ] && [ "$VLLM_WHEELS_EXIST" = true ]; then
-    VLLM_REMOTE_SHA=$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")
-    VLLM_LOCAL_SHA=""
-    [ -f "./wheels/.vllm-sha" ] && VLLM_LOCAL_SHA=$(cat "./wheels/.vllm-sha")
-    if [ -n "$VLLM_REMOTE_SHA" ] && [ "$VLLM_REMOTE_SHA" != "$VLLM_LOCAL_SHA" ]; then
-        echo "vLLM has upstream changes (${VLLM_REMOTE_SHA:0:8}) — rebuilding..."
+    if [ "$VLLM_REF_SET" = true ] || [ -n "$VLLM_PRS" ]; then
         REBUILD_VLLM=true
     fi
-fi
 
-if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
-    if [ "$REBUILD_VLLM" = true ]; then
-        if [ "$VLLM_REF_SET" = true ] && [ -n "$VLLM_PRS" ]; then
-            echo "Rebuilding vLLM wheels (--vllm-ref and --apply-vllm-pr specified)..."
-        elif [ "$VLLM_REF_SET" = true ]; then
-            echo "Rebuilding vLLM wheels (--vllm-ref specified)..."
-        elif [ -n "$VLLM_PRS" ]; then
-            echo "Rebuilding vLLM wheels (--apply-vllm-pr specified)..."
+    # Check if upstream has new commits
+    if [ "$REBUILD_VLLM" = false ] && [ "$VLLM_WHEELS_EXIST" = true ]; then
+        VLLM_REMOTE_SHA=$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")
+        VLLM_LOCAL_SHA=""
+        [ -f "./wheels/.vllm-sha" ] && VLLM_LOCAL_SHA=$(cat "./wheels/.vllm-sha")
+        if [ -n "$VLLM_REMOTE_SHA" ] && [ "$VLLM_REMOTE_SHA" != "$VLLM_LOCAL_SHA" ]; then
+            echo "vLLM has upstream changes (${VLLM_REMOTE_SHA:0:8}) — rebuilding..."
+            REBUILD_VLLM=true
+        fi
+    fi
+
+    if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
+        if [ "$REBUILD_VLLM" = true ]; then
+            if [ "$VLLM_REF_SET" = true ] && [ -n "$VLLM_PRS" ]; then
+                echo "Rebuilding vLLM wheels (--vllm-ref and --apply-vllm-pr specified)..."
+            elif [ "$VLLM_REF_SET" = true ]; then
+                echo "Rebuilding vLLM wheels (--vllm-ref specified)..."
+            elif [ -n "$VLLM_PRS" ]; then
+                echo "Rebuilding vLLM wheels (--apply-vllm-pr specified)..."
+            else
+                echo "Rebuilding vLLM wheels (--rebuild-vllm specified)..."
+            fi
         else
-            echo "Rebuilding vLLM wheels (--rebuild-vllm specified)..."
+            echo "No vLLM wheels found in ./wheels/ — building..."
+        fi
+
+        # Back up existing vllm wheels; restore them if the build fails
+        VLLM_BACKUP="./wheels/.backup-vllm"
+        rm -rf "$VLLM_BACKUP" && mkdir -p "$VLLM_BACKUP"
+        for f in ./wheels/vllm*.whl; do
+            [ -f "$f" ] && mv "$f" "$VLLM_BACKUP/"
+        done
+
+        VLLM_CMD=("docker" "build"
+            "--target" "vllm-export"
+            "--output" "type=local,dest=./wheels"
+            "--no-cache-filter" "vllm-builder"
+            "${COMMON_BUILD_FLAGS[@]}"
+            "--build-arg" "VLLM_REF=$VLLM_REF")
+
+        if [ -n "$VLLM_PRS" ]; then
+            echo "Applying vLLM PRs: $VLLM_PRS"
+            VLLM_CMD+=("--build-arg" "VLLM_PRS=$VLLM_PRS")
+        fi
+
+        VLLM_CMD+=(".")
+
+        echo "vLLM build command: ${VLLM_CMD[*]}"
+        VLLM_START=$(date +%s)
+        if "${VLLM_CMD[@]}"; then
+            VLLM_END=$(date +%s)
+            VLLM_BUILD_TIME=$((VLLM_END - VLLM_START))
+            rm -rf "$VLLM_BACKUP"
+            # Save the SHA we built from
+            VLLM_REMOTE_SHA=${VLLM_REMOTE_SHA:-$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")}
+            [ -n "$VLLM_REMOTE_SHA" ] && echo "$VLLM_REMOTE_SHA" > ./wheels/.vllm-sha
+        else
+            echo "vLLM build failed — restoring previous wheels..."
+            mv "$VLLM_BACKUP"/vllm*.whl ./wheels/ 2>/dev/null || true
+            rm -rf "$VLLM_BACKUP"
+            exit 1
         fi
     else
-        echo "No vLLM wheels found in ./wheels/ — building..."
-    fi
-
-    # Back up existing vllm wheels; restore them if the build fails
-    VLLM_BACKUP="./wheels/.backup-vllm"
-    rm -rf "$VLLM_BACKUP" && mkdir -p "$VLLM_BACKUP"
-    for f in ./wheels/vllm*.whl; do
-        [ -f "$f" ] && mv "$f" "$VLLM_BACKUP/"
-    done
-
-    VLLM_CMD=("docker" "build"
-        "--target" "vllm-export"
-        "--output" "type=local,dest=./wheels"
-        "--no-cache-filter" "vllm-builder"
-        "${COMMON_BUILD_FLAGS[@]}"
-        "--build-arg" "VLLM_REF=$VLLM_REF")
-
-    if [ -n "$VLLM_PRS" ]; then
-        echo "Applying vLLM PRs: $VLLM_PRS"
-        VLLM_CMD+=("--build-arg" "VLLM_PRS=$VLLM_PRS")
-    fi
-
-    VLLM_CMD+=(".")
-
-    echo "vLLM build command: ${VLLM_CMD[*]}"
-    VLLM_START=$(date +%s)
-    if "${VLLM_CMD[@]}"; then
-        VLLM_END=$(date +%s)
-        VLLM_BUILD_TIME=$((VLLM_END - VLLM_START))
-        rm -rf "$VLLM_BACKUP"
-        # Save the SHA we built from
-        VLLM_REMOTE_SHA=${VLLM_REMOTE_SHA:-$(resolve_remote_sha "$VLLM_REPO" "$VLLM_REF")}
-        [ -n "$VLLM_REMOTE_SHA" ] && echo "$VLLM_REMOTE_SHA" > ./wheels/.vllm-sha
-    else
-        echo "vLLM build failed — restoring previous wheels..."
-        mv "$VLLM_BACKUP"/vllm*.whl ./wheels/ 2>/dev/null || true
-        rm -rf "$VLLM_BACKUP"
-        exit 1
+        echo "vLLM wheels are up to date."
     fi
 else
-    echo "vLLM wheels are up to date."
+    # ---- Prebuilt path (standard GPU archs, no custom patches) ----
+    if [ "$REBUILD_VLLM" = true ] || [ "$VLLM_WHEELS_EXIST" = false ]; then
+        echo "Downloading prebuilt vLLM wheel from PyPI..."
+        rm -f ./wheels/vllm*.whl
+        rm -f ./wheels/.vllm-sha
+        VLLM_START=$(date +%s)
+        pip download vllm --no-deps --only-binary :all: -d ./wheels/ \
+            --python-version 3.12 \
+            --platform "manylinux_2_35_$(uname -m)"
+        VLLM_END=$(date +%s)
+        VLLM_BUILD_TIME=$((VLLM_END - VLLM_START))
+        echo "Downloaded: $(ls ./wheels/vllm*.whl | xargs -n1 basename)"
+    else
+        echo "vLLM prebuilt wheel is present."
+    fi
 fi
 
 # ----------------------------------------------------------
