@@ -11,8 +11,9 @@ model: openai/gpt-oss-120b
 # Container image to use
 container: vllm-node-mxfp4
 
-# Build arguments (NOTE: --exp-mxfp4 was removed; standard build supports MXFP4 natively now)
-build_args: []
+# Build arguments for build-and-copy.sh
+build_args:
+  - --exp-mxfp4
 
 # No mods required for this model
 mods: []

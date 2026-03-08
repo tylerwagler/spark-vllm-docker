@@ -1,12 +1,13 @@
-# Recipe: Qwen3.5-122B-A10B-INT4-Autoround
-# Qwen3.5-122B model in Intel INT4-Autoround quantization
+# Recipe: Qwen3.5-397B-A17B-FP8
+# Qwen3.5-397B-A17B model in FP8 precision
+# Multi-modal input
 
 recipe_version: "1"
-name: Qwen3.5-122B-INT4-Autoround
-description: vLLM serving Qwen3.5-122B-INT4-Autoround
+name: Qwen3.5-397B-A17B-FP8
+description: vLLM serving Qwen3.5-397B-A17B-FP8
 
 # HuggingFace model to download (optional, for --download-model)
-model: Intel/Qwen3.5-122B-A10B-int4-AutoRound
+model: Qwen/Qwen3.5-397B-A17B-FP8
 
 #solo_only: true
 
@@ -15,28 +16,32 @@ container: vllm-node-tf5
 
 build_args:
   - --tf5
+  - --rebuild-flashinfer
+  - --rebuild-vllm
 
 # Mod required to fix ROPE syntax error
 mods:
   - mods/fix-qwen3.5-autoround
-  - mods/fix-qwen3.5-chat-template
 
 # Default settings (can be overridden via CLI)
 defaults:
   port: 8000
   host: 0.0.0.0
-  tensor_parallel: 2
-  gpu_memory_utilization: 0.7
+  tensor_parallel: 4
+  gpu_memory_utilization: 0.85
   max_model_len: 262144
   max_num_batched_tokens: 8192
 
 # Environment variables
 env: 
-  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+  VLLM_USE_DEEP_GEMM: 0
+  VLLM_USE_FLASHINFER_MOE_FP16: 1
+  VLLM_USE_FLASHINFER_SAMPLER: 0
+  OMP_NUM_THREADS: 4
 
 # The vLLM serve command template
 command: |
-  vllm serve Intel/Qwen3.5-122B-A10B-int4-AutoRound \
+  vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
     --max-model-len {max_model_len} \
     --gpu-memory-utilization {gpu_memory_utilization} \
     --port {port} \
@@ -48,7 +53,11 @@ command: |
     --reasoning-parser qwen3 \
     --max-num-batched-tokens {max_num_batched_tokens} \
     --trust-remote-code \
-    --chat-template unsloth.jinja \
     -tp {tensor_parallel} \
-    --distributed-executor-backend ray
+    --distributed-executor-backend ray \
+    --mm-encoder-tp-mode data \
+    --kv-cache-dtype fp8 \
+    --compilation-config.cudagraph_mode none \
+    --max-num-seqs 32 \
+    --attention-backend flashinfer
 
