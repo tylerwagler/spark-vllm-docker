@@ -170,6 +170,29 @@ if [ "$CHECK_ONLY" = true ]; then
         fi
     fi
 
+    # Pip packages — compare installed versions in existing image vs PyPI latest
+    PIP_PACKAGES="flashinfer-python transformers ray fastsafetensors"
+    if docker image inspect "$IMAGE_TAG" &>/dev/null; then
+        for pkg in $PIP_PACKAGES; do
+            INSTALLED=$(docker run --rm --env NVIDIA_PRODUCT_NAME=none "$IMAGE_TAG" \
+                python3 -c "import importlib.metadata; print(importlib.metadata.version('$pkg'))" 2>/dev/null \
+                | tail -1) || INSTALLED=""
+            LATEST=$(curl -s "https://pypi.org/pypi/$pkg/json" 2>/dev/null \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])" 2>/dev/null) || LATEST=""
+            label=$(printf '%-12s' "$pkg")
+            if [ -z "$INSTALLED" ] || [ -z "$LATEST" ]; then
+                echo "  ? $label — could not check"
+            elif [ "$INSTALLED" != "$LATEST" ]; then
+                echo "  ✗ $label — installed $INSTALLED, latest $LATEST"
+                STALE=$((STALE + 1))
+            else
+                echo "  ✓ $label — $INSTALLED"
+            fi
+        done
+    else
+        echo "  ? pip packages — no existing $IMAGE_TAG image to check"
+    fi
+
     # NGC base image (query Docker registry for latest tag)
     NGC_LATEST=""
     NGC_TOKEN=$(curl -s "https://nvcr.io/proxy_auth?scope=repository:nvidia/pytorch:pull" 2>/dev/null \
