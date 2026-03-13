@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.6
 
 # Limit build parallelism to reduce OOM situations
-ARG BUILD_JOBS=16
+ARG BUILD_JOBS=14
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
 
 # =========================================================
